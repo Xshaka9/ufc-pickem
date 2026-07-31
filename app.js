@@ -196,17 +196,25 @@ async function espnGetCard(espnId, dateISO) {
 }
 
 /* ================= scoring engine ================= */
-function scoreFight(pick, result) {
+// Numbered cards (UFC 330 etc.) allow round/method bonuses on the full card;
+// Fight Nights only allow bonuses on the main card.
+function bonusScopeOf(ev) {
+  return ev?.bonusScope || (/ufc\s*\d+/i.test(ev?.name || "") ? "full" : "main");
+}
+function fightBonusEligible(ev, f) {
+  return bonusScopeOf(ev) === "full" || f.section === "main";
+}
+function scoreFight(pick, result, bonusEligible = true) {
   if (!result || !result.winner) return null;         // no result yet, or NC/draw → excluded
   if (!pick || !pick.w) return { pts: 0, correct: false, noPick: true, roundBonus: false, methodBonus: false };
   const correct = Number(pick.w) === Number(result.winner);
   if (!correct) return { pts: 0, correct: false, roundBonus: false, methodBonus: false };
-  const roundBonus = !!(pick.r && result.round && Number(pick.r) === Number(result.round));
-  const methodBonus = !!(pick.m && result.method && pick.m === result.method);
+  const roundBonus = bonusEligible && !!(pick.r && result.round && Number(pick.r) === Number(result.round));
+  const methodBonus = bonusEligible && !!(pick.m && result.method && pick.m === result.method);
   return { pts: 1 + (roundBonus ? 1 : 0) + (methodBonus ? 1 : 0), correct: true, roundBonus, methodBonus };
 }
 // aggregate one event for all players → {slug: {correct,pts,decided,pickemCorrect,pickemTotal,perfect,noHitter}}
-function scoreEvent(fights, picksBySlug) {
+function scoreEvent(fights, picksBySlug, ev) {
   const out = {};
   const scorable = fights.filter((f) => !f.omitted);
   for (const p of PLAYERS) {
@@ -214,7 +222,7 @@ function scoreEvent(fights, picksBySlug) {
     const participated = scorable.some((f) => mine[f.id]?.w);
     let correct = 0, pts = 0, decided = 0, pickemCorrect = 0, pickemTotal = 0;
     for (const f of scorable) {
-      const s = scoreFight(mine[f.id], f.result);
+      const s = scoreFight(mine[f.id], f.result, fightBonusEligible(ev, f));
       if (s === null) continue;
       decided++;
       if (s.correct) correct++;
@@ -600,6 +608,7 @@ async function syncEventsList() {
         dateISO: f.dateISO,
         startMs: new Date(f.dateISO).getTime(),
         year: yearOf(f.dateISO),
+        bonusScope: /ufc\s*\d+/i.test(f.name || "") ? "full" : "main",
         createdBy: state.me,
       });
       added++;
@@ -659,10 +668,12 @@ async function renderEvent(quiet = false) {
     wrap.append(el("div", { class: "card muted" },
       ev.espnId ? 'Tap "Import Card" to pull the fight card from ESPN.' : "Add fights manually with + Add Fight."));
   }
+  const scope = bonusScopeOf(ev);
   for (const sec of SECTIONS) {
     const secFights = fights.filter((f) => f.section === sec.v);
     if (!secFights.length) continue;
-    wrap.append(el("div", { class: "card-section-title" }, sec.label));
+    const noBonus = scope !== "full" && sec.v !== "main";
+    wrap.append(el("div", { class: "card-section-title" }, sec.label + (noBonus ? "  —  no bonuses" : "")));
     for (const f of secFights) wrap.append(fightRow(ev, f, mine, allPicks, locked));
   }
 
@@ -695,21 +706,27 @@ function fightRow(ev, f, mine, allPicks, locked) {
     onclick: () => setPick(f, { ...pick, w: pick.w === 2 ? undefined : 2 }),
   }, f.f2);
 
-  const rdSel = el("select", { class: "select", disabled: locked ? "disabled" : null,
-    onchange: (e) => setPick(f, { ...pick, r: e.target.value ? Number(e.target.value) : undefined }) },
-    el("option", { value: "" }, "Rd: any"),
-    ...Array.from({ length: f.rounds || 3 }, (_, i) =>
-      el("option", { value: String(i + 1), selected: pick.r === i + 1 ? "selected" : null }, "Rd " + (i + 1))));
-  const mSel = el("select", { class: "select", disabled: locked ? "disabled" : null,
-    onchange: (e) => setPick(f, { ...pick, m: e.target.value || undefined }) },
-    el("option", { value: "" }, "By: any"),
-    ...METHODS.map((m) =>
-      el("option", { value: m.v, selected: pick.m === m.v ? "selected" : null }, m.label)));
+  const bonusOK = fightBonusEligible(ev, f);
+  const extras = [];
+  if (bonusOK) {
+    extras.push(el("select", { class: "select", disabled: locked ? "disabled" : null,
+      onchange: (e) => setPick(f, { ...pick, r: e.target.value ? Number(e.target.value) : undefined }) },
+      el("option", { value: "" }, "Rd: any"),
+      ...Array.from({ length: f.rounds || 3 }, (_, i) =>
+        el("option", { value: String(i + 1), selected: pick.r === i + 1 ? "selected" : null }, "Rd " + (i + 1)))));
+    extras.push(el("select", { class: "select", disabled: locked ? "disabled" : null,
+      onchange: (e) => setPick(f, { ...pick, m: e.target.value || undefined }) },
+      el("option", { value: "" }, "By: any"),
+      ...METHODS.map((m) =>
+        el("option", { value: m.v, selected: pick.m === m.v ? "selected" : null }, m.label))));
+  } else {
+    extras.push(el("span", { class: "muted small", style: "flex:1;align-self:center" }, "Winner only — no bonuses"));
+  }
+  extras.push(el("button", { class: "btn small ghost", onclick: () => editFightModal(ev, f) }, "✎"));
 
   const headBits = [
     el("div", { class: "fight-vs" }, b1, el("span", { class: "vs-label" }, "VS"), b2),
-    el("div", { class: "pick-extras" }, rdSel, mSel,
-      el("button", { class: "btn small ghost", onclick: () => editFightModal(ev, f) }, "✎")),
+    el("div", { class: "pick-extras" }, ...extras),
   ];
   if (f.pickem) headBits.unshift(el("div", { class: "pickem-flag" }, "⚔ PICK'EM FIGHT"));
   const node = el("div", { class: "fight" }, el("div", { class: "fight-head" }, ...headBits));
@@ -730,11 +747,13 @@ function fightRow(ev, f, mine, allPicks, locked) {
     const reveal = el("div", { class: "fight-picks-reveal" });
     for (const p of PLAYERS) {
       const pk = allPicks[p.slug]?.picks?.[f.id];
-      const s = scoreFight(pk, res);
+      const s = scoreFight(pk, res, bonusOK);
       let txt = "—";
       if (pk?.w) {
         txt = pk.w === 1 ? f.f1 : f.f2;
-        const extra = [pk.r ? "R" + pk.r : null, pk.m ? METHODS.find((m) => m.v === pk.m)?.label : null].filter(Boolean).join(" ");
+        const extra = bonusOK
+          ? [pk.r ? "R" + pk.r : null, pk.m ? METHODS.find((m) => m.v === pk.m)?.label : null].filter(Boolean).join(" ")
+          : "";
         if (extra) txt += ` (${extra})`;
       } else if (!allPicks[p.slug]) {
         txt = "no picks";
@@ -782,7 +801,7 @@ function renderEventScoreboard(ev, fights, allPicks, locked) {
     }
     return;
   }
-  const scores = scoreEvent(fights, allPicks);
+  const scores = scoreEvent(fights, allPicks, ev);
   const ranked = PLAYERS.slice().sort((a, b) => scores[b.slug].pts - scores[a.slug].pts);
   const tbl = el("table", {},
     el("tr", {}, ...["Player", "Pts", "Correct", "Bonus", ""].map((h) => el("th", {}, h))),
@@ -930,9 +949,13 @@ function editEventModal(ev) {
   const dateIn = el("input", { type: "datetime-local" });
   const d = new Date(ev.dateISO);
   dateIn.value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  const scopeSel = el("select", {},
+    el("option", { value: "main", selected: bonusScopeOf(ev) === "main" ? "selected" : null }, "Main card only (Fight Night rules)"),
+    el("option", { value: "full", selected: bonusScopeOf(ev) === "full" ? "selected" : null }, "Full card (numbered event rules)"));
   const body = [
     el("label", {}, "Event name (rename it something dumb, tradition demands it)"), nameIn,
     el("label", {}, "Start time — picks lock at this moment"), dateIn,
+    el("label", {}, "Round/method bonuses apply to"), scopeSel,
   ];
   showModal("Edit Event", body, [
     {
@@ -948,7 +971,7 @@ function editEventModal(ev) {
       label: "Save", style: "primary",
       onClick: async () => {
         const iso = new Date(dateIn.value).toISOString();
-        await DATA.saveEvent({ ...ev, name: nameIn.value.trim() || ev.name, dateISO: iso, startMs: new Date(iso).getTime(), year: yearOf(iso) });
+        await DATA.saveEvent({ ...ev, name: nameIn.value.trim() || ev.name, dateISO: iso, startMs: new Date(iso).getTime(), year: yearOf(iso), bonusScope: scopeSel.value });
         renderEvent(true);
       },
     },
@@ -981,7 +1004,7 @@ async function renderBoard() {
     const fights = await DATA.listFights(ev.id);
     if (!fights.some((f) => f.result)) continue;
     const picks = await DATA.getAllPicks(ev.id);
-    const s = scoreEvent(fights, picks);
+    const s = scoreEvent(fights, picks, ev);
     for (const p of PLAYERS) {
       const x = s[p.slug];
       if (!x.participated) continue; // skipped this card — doesn't count against them
