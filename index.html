@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0d0d12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<title>UFC Pick'em League</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <!-- ============ SIGN IN ============ -->
+  <section id="view-signin" class="view">
+    <div class="signin-wrap">
+      <div class="logo-block">
+        <div class="logo-octagon">&#x1F94A;</div>
+        <h1>UFC PICK'EM</h1>
+        <p class="tagline">Beezus &bull; Tee Tee &bull; Dripple &bull; Gnarl</p>
+      </div>
+      <div id="signin-players" class="player-grid"><!-- player buttons injected --></div>
+      <div id="signin-pin" class="pin-block hidden">
+        <p id="pin-title">Enter your PIN</p>
+        <input id="pin-input" type="password" inputmode="numeric" autocomplete="current-password" placeholder="PIN (6+ digits)" maxlength="12">
+        <div class="row-gap">
+          <button id="pin-back" class="btn ghost">Back</button>
+          <button id="pin-go" class="btn primary">Sign In</button>
+        </div>
+        <p id="pin-error" class="error hidden"></p>
+      </div>
+      <p id="signin-status" class="muted small"></p>
+    </div>
+  </section>
+
+  <!-- ============ MAIN APP ============ -->
+  <section id="view-main" class="view hidden">
+    <header id="topbar">
+      <span id="topbar-title">Events</span>
+      <span id="topbar-user" class="chip"></span>
+    </header>
+
+    <main id="content">
+      <!-- EVENTS TAB -->
+      <div id="tab-events" class="tab">
+        <div class="section-head">
+          <h2>Upcoming</h2>
+          <button id="btn-sync-events" class="btn small primary">&#8635; Find Events</button>
+        </div>
+        <div id="events-upcoming" class="event-list"></div>
+        <div class="section-head"><h2>Past Events</h2></div>
+        <div id="events-past" class="event-list"></div>
+      </div>
+
+      <!-- EVENT DETAIL / PICKS -->
+      <div id="tab-event" class="tab hidden">
+        <div id="event-head"></div>
+        <div id="event-tools" class="row-gap wrap"></div>
+        <div id="event-fights"></div>
+        <div id="event-scoreboard"></div>
+      </div>
+
+      <!-- LEADERBOARD TAB -->
+      <div id="tab-board" class="tab hidden">
+        <div class="section-head">
+          <h2>Leaderboard</h2>
+          <select id="board-year" class="select"></select>
+        </div>
+        <div id="board-body"></div>
+      </div>
+
+      <!-- MORE TAB -->
+      <div id="tab-more" class="tab hidden">
+        <h2>Settings</h2>
+        <div class="card">
+          <p><b id="more-name"></b></p>
+          <button id="btn-change-pin" class="btn ghost">Change PIN</button>
+          <button id="btn-signout" class="btn ghost">Sign Out</button>
+        </div>
+        <div class="card">
+          <p><b>League admin</b></p>
+          <button id="btn-import-legacy" class="btn ghost">Import 2019&ndash;2026 spreadsheet totals</button>
+          <p class="muted small">One-time: seeds the all-time leaderboard with the historical numbers from the Google Sheet.</p>
+        </div>
+        <div class="card">
+          <p class="muted small" id="app-version"></p>
+        </div>
+      </div>
+    </main>
+
+    <nav id="navbar">
+      <button data-tab="events" class="nav-btn active"><span>&#x1F5D3;</span>Events</button>
+      <button data-tab="board" class="nav-btn"><span>&#x1F3C6;</span>Board</button>
+      <button data-tab="more" class="nav-btn"><span>&#x2699;</span>More</button>
+    </nav>
+  </section>
+
+  <div id="toast" class="hidden"></div>
+  <div id="modal-root"></div>
+</div>
+
+<script src="firebase-config.js"></script>
+<script src="legacy-data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,57 @@
+rules_version = '2';
+// ============================================================
+// UFC Pick'em — Firestore security rules
+// Paste into: Firebase Console > Firestore Database > Rules
+// ------------------------------------------------------------
+// - Only signed-in players can read/write anything.
+// - Each player can only write their OWN picks.
+// - Picks are hidden from other players until the event starts.
+// ============================================================
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // The event has started (picks locked & revealed) when now >= event date
+    function eventStarted(eventId) {
+      return request.time.toMillis() >=
+        get(/databases/$(database)/documents/events/$(eventId)).data.startMs;
+    }
+
+    // Does this auth user own the player profile {slug}?
+    function ownsPlayer(slug) {
+      return get(/databases/$(database)/documents/players/$(slug)).data.uid
+        == request.auth.uid;
+    }
+
+    match /players/{slug} {
+      allow read: if signedIn();
+      // claim an unclaimed player: doc must not exist yet, uid must be caller's
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
+      // only the owner may update their profile
+      allow update: if signedIn() && resource.data.uid == request.auth.uid;
+      allow delete: if false;
+    }
+
+    match /events/{eventId} {
+      allow read, write: if signedIn();
+
+      match /fights/{fightId} {
+        allow read, write: if signedIn();
+      }
+
+      match /picks/{slug} {
+        // your own picks: always readable; others' only after the event starts
+        allow read: if signedIn() && (ownsPlayer(slug) || eventStarted(eventId));
+        // you can only write your own picks, and only before the event starts
+        allow write: if signedIn() && ownsPlayer(slug) && !eventStarted(eventId);
+      }
+    }
+
+    match /league/{doc} {
+      allow read, write: if signedIn();
+    }
+  }
+}
