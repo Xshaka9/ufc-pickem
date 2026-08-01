@@ -204,6 +204,22 @@ function bonusScopeOf(ev) {
 function fightBonusEligible(ev, f) {
   return bonusScopeOf(ev) === "full" || f.section === "main";
 }
+// Picks remember the fighter's NAME so a late replacement can't silently
+// steal the pick. If the picked name no longer matches either corner, the
+// pick is void (scored as "no pick", never as "incorrect").
+function normName(s) {
+  return (s || "").toLowerCase().normalize("NFD")
+    .replace(new RegExp("[\\u0300-\\u036f]", "g"), "")  // strip accents
+    .replace(/[^a-z ]/g, "").trim();
+}
+function effectivePick(f, pick) {
+  if (!pick || !pick.w) return null;
+  if (!pick.n) return { ...pick, valid: true }; // legacy pick without a stored name
+  const n = normName(pick.n);
+  if (n === normName(f.f1)) return { ...pick, w: 1, valid: true };
+  if (n === normName(f.f2)) return { ...pick, w: 2, valid: true };
+  return { ...pick, valid: false };
+}
 function scoreFight(pick, result, bonusEligible = true) {
   if (!result || !result.winner) return null;         // no result yet, or NC/draw → excluded
   if (!pick || !pick.w) return { pts: 0, correct: false, noPick: true, roundBonus: false, methodBonus: false };
@@ -219,10 +235,11 @@ function scoreEvent(fights, picksBySlug, ev) {
   const scorable = fights.filter((f) => !f.omitted);
   for (const p of PLAYERS) {
     const mine = picksBySlug[p.slug]?.picks || {};
-    const participated = scorable.some((f) => mine[f.id]?.w);
+    const participated = scorable.some((f) => effectivePick(f, mine[f.id])?.valid);
     let correct = 0, pts = 0, decided = 0, pickemCorrect = 0, pickemTotal = 0;
     for (const f of scorable) {
-      const s = scoreFight(mine[f.id], f.result, fightBonusEligible(ev, f));
+      const ep = effectivePick(f, mine[f.id]);
+      const s = scoreFight(ep?.valid ? ep : undefined, f.result, fightBonusEligible(ev, f));
       if (s === null) continue;
       decided++;
       if (s.correct) correct++;
@@ -688,22 +705,24 @@ function fightRow(ev, f, mine, allPicks, locked) {
     return el("div", { class: "fight omitted" },
       el("div", { class: "fight-head", style: "display:flex;align-items:center;gap:10px" },
         el("span", { class: "badge done" }, "Omitted"),
-        el("span", { class: "muted", style: "flex:1" }, `${f.f1} vs ${f.f2} — not counted`),
+        el("span", { class: "muted", style: "flex:1" }, `${f.f1} vs ${f.f2} — ${f.omitReason || "not counted"}`),
         el("button", { class: "btn small ghost", onclick: () => editFightModal(ev, f) }, "✎")));
   }
-  const pick = mine[f.id] || {};
+  const raw = mine[f.id] || {};
+  const eff = effectivePick(f, raw);
+  const pick = eff?.valid ? eff : {};   // void picks render as no pick
   const res = f.result;
   const decided = res && res.winner !== undefined && res !== null;
 
   const b1 = el("button", {
     class: "fighter-btn" + (pick.w === 1 ? " picked" : "") + (res?.winner === 1 ? " won" : ""),
     disabled: locked ? "disabled" : null,
-    onclick: () => setPick(f, { ...pick, w: pick.w === 1 ? undefined : 1 }),
+    onclick: () => setPick(f, { ...raw, w: pick.w === 1 ? undefined : 1 }),
   }, f.f1);
   const b2 = el("button", {
     class: "fighter-btn" + (pick.w === 2 ? " picked" : "") + (res?.winner === 2 ? " won" : ""),
     disabled: locked ? "disabled" : null,
-    onclick: () => setPick(f, { ...pick, w: pick.w === 2 ? undefined : 2 }),
+    onclick: () => setPick(f, { ...raw, w: pick.w === 2 ? undefined : 2 }),
   }, f.f2);
 
   const bonusOK = fightBonusEligible(ev, f);
@@ -729,6 +748,11 @@ function fightRow(ev, f, mine, allPicks, locked) {
     el("div", { class: "pick-extras" }, ...extras),
   ];
   if (f.pickem) headBits.unshift(el("div", { class: "pickem-flag" }, "⚔ PICK'EM FIGHT"));
+  if (eff && !eff.valid) {
+    headBits.push(el("div", { class: "error", style: "margin-top:8px" },
+      `⚠ Your pick (${raw.n}) is no longer in this fight` +
+      (locked ? " — it scores as no pick." : " — tap a fighter to re-pick.")));
+  }
   const node = el("div", { class: "fight" }, el("div", { class: "fight-head" }, ...headBits));
 
   if (decided && res.winner !== undefined) {
@@ -747,12 +771,15 @@ function fightRow(ev, f, mine, allPicks, locked) {
     const reveal = el("div", { class: "fight-picks-reveal" });
     for (const p of PLAYERS) {
       const pk = allPicks[p.slug]?.picks?.[f.id];
-      const s = scoreFight(pk, res, bonusOK);
+      const ep = effectivePick(f, pk);
+      const s = scoreFight(ep?.valid ? ep : undefined, res, bonusOK);
       let txt = "—";
-      if (pk?.w) {
-        txt = pk.w === 1 ? f.f1 : f.f2;
+      if (ep && !ep.valid) {
+        txt = `${pk.n} (off card — void)`;
+      } else if (ep?.w) {
+        txt = ep.w === 1 ? f.f1 : f.f2;
         const extra = bonusOK
-          ? [pk.r ? "R" + pk.r : null, pk.m ? METHODS.find((m) => m.v === pk.m)?.label : null].filter(Boolean).join(" ")
+          ? [ep.r ? "R" + ep.r : null, ep.m ? METHODS.find((m) => m.v === ep.m)?.label : null].filter(Boolean).join(" ")
           : "";
         if (extra) txt += ` (${extra})`;
       } else if (!allPicks[p.slug]) {
@@ -775,7 +802,10 @@ async function setPick(f, newPick) {
   const all = await DATA.getAllPicks(evId);
   const mine = all[state.me]?.picks || {};
   const clean = {};
-  if (newPick.w) clean.w = newPick.w;
+  if (newPick.w) {
+    clean.w = newPick.w;
+    clean.n = newPick.w === 1 ? f.f1 : f.f2; // remember the name — guards against late replacements
+  }
   if (newPick.r) clean.r = newPick.r;
   if (newPick.m) clean.m = newPick.m;
   if (Object.keys(clean).length) mine[f.id] = clean;
@@ -794,7 +824,7 @@ function renderEventScoreboard(ev, fights, allPicks, locked) {
     const total = pickable.length;
     if (total) {
       const mine = allPicks[state.me]?.picks || {};
-      const made = pickable.filter((f) => mine[f.id]?.w).length;
+      const made = pickable.filter((f) => effectivePick(f, mine[f.id])?.valid).length;
       box.append(el("div", { class: "card", style: "margin-top:16px" },
         el("b", {}, `Your picks: ${made}/${total}`),
         el("p", { class: "muted small" }, "Other players' picks are hidden until the event starts.")));
@@ -826,13 +856,18 @@ async function syncCard(ev, existingFights) {
   try {
     const card = await espnGetCard(ev.espnId, ev.dateISO);
     const byEspn = new Map(existingFights.map((f) => [f.espnId, f]));
-    let added = 0, updated = 0;
+    const onEspn = new Set(card.fights.map((f) => f.espnId));
+    let added = 0, updated = 0, swapped = 0, scratched = 0;
     for (const nf of card.fights) {
       const old = byEspn.get(nf.espnId);
       if (old) {
-        // keep picks/pickem flags; refresh names/order/section/rounds from ESPN
+        // keep picks/pickem/result; refresh names/order/section/rounds from ESPN
+        if (normName(old.f1) !== normName(nf.f1) || normName(old.f2) !== normName(nf.f2)) swapped++;
         const merged = { ...old, f1: nf.f1, f2: nf.f2, order: nf.order, rounds: nf.rounds, section: nf.section };
         if (!old.result && nf.result) merged.result = nf.result;
+        if (old.omitted && old.omitReason === "removed from ESPN card") {
+          merged.omitted = false; merged.omitReason = null; // fight is back on
+        }
         await DATA.saveFight(ev.id, merged);
         updated++;
       } else {
@@ -840,10 +875,20 @@ async function syncCard(ev, existingFights) {
         added++;
       }
     }
+    // fights that vanished from the ESPN card → auto-omit (reversible via ✎)
+    for (const old of existingFights) {
+      if (old.espnId && !onEspn.has(old.espnId) && !old.omitted && !old.result) {
+        await DATA.saveFight(ev.id, { ...old, omitted: true, omitReason: "removed from ESPN card" });
+        scratched++;
+      }
+    }
     if (card.dateISO && card.dateISO !== ev.dateISO) {
       await DATA.saveEvent({ ...ev, dateISO: card.dateISO, startMs: new Date(card.dateISO).getTime() });
     }
-    toast(`Card synced — ${added} added, ${updated} refreshed`);
+    let msg = `Card synced — ${added} added, ${updated} refreshed`;
+    if (swapped) msg += `, ${swapped} fighter change${swapped > 1 ? "s" : ""} ⚠`;
+    if (scratched) msg += `, ${scratched} scratched (omitted)`;
+    toast(msg, swapped || scratched ? 5000 : 2600);
     renderEvent(true);
   } catch (e) {
     console.error(e);
@@ -928,6 +973,7 @@ function editFightModal(ev, fight, nextOrder = 0) {
         f.rounds = Number(rdsSel.value);
         f.pickem = pickemChk.checked;
         f.omitted = omitChk.checked;
+        if (!f.omitted) f.omitReason = null;
         if (winSel.value === "") f.result = null;
         else f.result = {
           winner: Number(winSel.value),
@@ -1091,7 +1137,9 @@ function changePinModal() {
 /* ================= boot ================= */
 async function boot() {
   const cfg = window.FIREBASE_CONFIG;
-  if (cfg && cfg.apiKey) {
+  // ?demo=1 forces device-only demo mode — safe sandbox that never touches the league
+  const forceDemo = new URLSearchParams(location.search).has("demo");
+  if (cfg && cfg.apiKey && !forceDemo) {
     try {
       DATA = await makeFirebaseStore(cfg);
       LIVE = true;
