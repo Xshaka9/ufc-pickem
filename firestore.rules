@@ -45,8 +45,13 @@ service cloud.firestore {
       match /picks/{slug} {
         // your own picks: always readable; others' only after the event starts
         allow read: if signedIn() && (ownsPlayer(slug) || eventStarted(eventId));
-        // you can only write your own picks, and only before the event starts
-        allow write: if signedIn() && ownsPlayer(slug) && !eventStarted(eventId);
+        // you can only write your own picks, and only before the event starts —
+        // except on archived (sheet-imported) events, where the importer
+        // writes everyone's historical picks
+        allow write: if signedIn() && (
+          (ownsPlayer(slug) && !eventStarted(eventId)) ||
+          get(/databases/$(database)/documents/events/$(eventId)).data.archived == true
+        );
       }
     }
 

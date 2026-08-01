@@ -112,6 +112,14 @@ body {
 
 /* ===== event cards ===== */
 .event-list { display: flex; flex-direction: column; gap: 10px; }
+details { margin-bottom: 10px; }
+.year-summary {
+  cursor: pointer; font-size: 15px; font-weight: 800; letter-spacing: 1px;
+  padding: 12px 14px; background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); list-style: none;
+}
+.year-summary::before { content: "▸ "; color: var(--gold); }
+details[open] .year-summary::before { content: "▾ "; }
 .event-card {
   background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 14px 16px; cursor: pointer; position: relative;

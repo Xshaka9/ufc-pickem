@@ -268,9 +268,14 @@ function makeLocalStore() {
   function save(db) { localStorage.setItem(KEY, JSON.stringify(db)); }
   let db = load();
   db.players ||= {}; db.events ||= {}; db.legacy ||= null;
+  let bulk = false;
+  const realSave = save;
+  save = (d) => { if (!bulk) realSave(d); };
   return {
     mode: "demo",
     async init() {},
+    beginBulk() { bulk = true; },
+    endBulk() { bulk = false; realSave(db); },
     currentSlug() { return db.session || null; },
     async listPlayers() {
       return PLAYERS.map((p) => ({ ...p, claimed: !!db.players[p.slug] }));
@@ -315,6 +320,9 @@ function makeLocalStore() {
     async saveMyPicks(evId, picksObj) {
       const slug = db.session;
       db.events[evId].picks[slug] = { picks: picksObj, updatedAt: Date.now() }; save(db);
+    },
+    async savePicksFor(evId, slug, picksDoc) {
+      db.events[evId].picks[slug] = picksDoc; save(db);
     },
     subscribeEvent() { return () => {}; },
     async getLegacy() { return db.legacy; },
@@ -441,6 +449,9 @@ async function makeFirebaseStore(cfg) {
       await setDoc(doc(fdb, "events", evId, "picks", slug), {
         uid: auth.currentUser.uid, picks: picksObj, updatedAt: Date.now(),
       });
+    },
+    async savePicksFor(evId, slug, picksDoc) {
+      await setDoc(doc(fdb, "events", evId, "picks", slug), picksDoc);
     },
     subscribeEvent(evId, cb) {
       const un1 = onSnapshot(collection(fdb, "events", evId, "fights"), () => cb());
@@ -578,13 +589,31 @@ async function refreshEvents() {
       'No upcoming events yet. Tap "Find Events" to pull the UFC schedule.'));
   }
   for (const ev of upcoming) upEl.append(eventCard(ev, false));
-  for (const ev of past) pastEl.append(eventCard(ev, true));
-  if (!past.length) pastEl.append(el("div", { class: "card muted" }, "No past events recorded in the app yet."));
+  if (!past.length) {
+    pastEl.append(el("div", { class: "card muted" }, "No past events recorded in the app yet."));
+    return;
+  }
+  // group past events by year — newest year open, older collapsed
+  const byYear = {};
+  for (const ev of past) {
+    const y = String(ev.year || yearOf(ev.dateISO));
+    (byYear[y] ||= []).push(ev);
+  }
+  const years = Object.keys(byYear).sort((a, b) => b - a);
+  years.forEach((y, i) => {
+    const det = el("details", i === 0 ? { open: "open" } : {});
+    det.append(el("summary", { class: "year-summary" }, `${y}  (${byYear[y].length} events)`));
+    const list = el("div", { class: "event-list", style: "margin-top:8px" });
+    for (const ev of byYear[y]) list.append(eventCard(ev, true));
+    det.append(list);
+    pastEl.append(det);
+  });
 }
 function eventCard(ev, isPast) {
   const locked = eventLocked(ev);
   const badges = el("div", { class: "ev-badges" });
-  if (isPast) badges.append(el("span", { class: "badge done" }, "Final"));
+  if (ev.archived) badges.append(el("span", { class: "badge picks" }, "Sheet Era"));
+  else if (isPast) badges.append(el("span", { class: "badge done" }, "Final"));
   else if (locked) badges.append(el("span", { class: "badge live" }, "Live"));
   else badges.append(el("span", { class: "badge open" }, "Picks Open"));
   return el("div", { class: "event-card", onclick: () => openEvent(ev.id) },
@@ -670,13 +699,16 @@ async function renderEvent(quiet = false) {
   /* --- tools --- */
   const tools = $("event-tools");
   tools.innerHTML = "";
-  if (ev.espnId) {
+  if (ev.archived) {
+    // archive: results are history, no ESPN syncing
+  } else if (ev.espnId) {
     tools.append(el("button", { class: "btn small", onclick: () => syncCard(ev, fights) },
       fights.length ? "↻ Refresh Card" : "⬇ Import Card"));
     tools.append(el("button", { class: "btn small gold", onclick: () => syncResults(ev, fights) }, "⚡ Sync Results"));
   }
-  tools.append(el("button", { class: "btn small ghost", onclick: () => editFightModal(ev, null, fights.length) }, "+ Add Fight"));
+  if (!ev.archived) tools.append(el("button", { class: "btn small ghost", onclick: () => editFightModal(ev, null, fights.length) }, "+ Add Fight"));
   tools.append(el("button", { class: "btn small ghost", onclick: () => editEventModal(ev) }, "✎ Event"));
+  if (ev.note) tools.append(el("div", { class: "card muted small", style: "width:100%" }, ev.note));
 
   /* --- fights --- */
   const wrap = $("event-fights");
@@ -727,7 +759,9 @@ function fightRow(ev, f, mine, allPicks, locked) {
 
   const bonusOK = fightBonusEligible(ev, f);
   const extras = [];
-  if (bonusOK) {
+  if (ev.archived) {
+    extras.push(el("button", { class: "btn small ghost", onclick: () => editFightModal(ev, f) }, "✎"));
+  } else if (bonusOK) {
     extras.push(el("select", { class: "select", disabled: locked ? "disabled" : null,
       onchange: (e) => setPick(f, { ...pick, r: e.target.value ? Number(e.target.value) : undefined }) },
       el("option", { value: "" }, "Rd: any"),
@@ -741,14 +775,14 @@ function fightRow(ev, f, mine, allPicks, locked) {
   } else {
     extras.push(el("span", { class: "muted small", style: "flex:1;align-self:center" }, "Winner only — no bonuses"));
   }
-  extras.push(el("button", { class: "btn small ghost", onclick: () => editFightModal(ev, f) }, "✎"));
+  if (!ev.archived) extras.push(el("button", { class: "btn small ghost", onclick: () => editFightModal(ev, f) }, "✎"));
 
   const headBits = [
     el("div", { class: "fight-vs" }, b1, el("span", { class: "vs-label" }, "VS"), b2),
     el("div", { class: "pick-extras" }, ...extras),
   ];
   if (f.pickem) headBits.unshift(el("div", { class: "pickem-flag" }, "⚔ PICK'EM FIGHT"));
-  if (eff && !eff.valid) {
+  if (!ev.archived && eff && !eff.valid) {
     headBits.push(el("div", { class: "error", style: "margin-top:8px" },
       `⚠ Your pick (${raw.n}) is no longer in this fight` +
       (locked ? " — it scores as no pick." : " — tap a fighter to re-pick.")));
@@ -759,14 +793,28 @@ function fightRow(ev, f, mine, allPicks, locked) {
     const winName = res.winner === 1 ? f.f1 : res.winner === 2 ? f.f2 : "No Contest / Draw";
     const parts = [el("span", { class: "res-main" }, "✔ " + winName)];
     if (res.winner) {
-      parts.push(el("span", { class: "muted" },
-        (res.method === "DEC" ? (res.detail || "Decision") : res.detail || res.method) +
-        (res.round ? ` • R${res.round}` : "") + (res.clock ? ` ${res.clock}` : "")));
+      const how = res.method === "DEC" ? (res.detail || "Decision") : (res.detail || res.method || res.text || "");
+      const line = how + (res.round ? ` • R${res.round}` : "") + (res.clock ? ` ${res.clock}` : "");
+      if (line.trim()) parts.push(el("span", { class: "muted" }, line));
     }
     node.append(el("div", { class: "fight-result" }, ...parts));
   }
 
   // after lock: reveal everyone's picks + per-fight points
+  if (locked && ev.archived) {
+    // archive: picks are sheet text + the sheet's own CORRECT/INCORRECT verdict
+    const reveal = el("div", { class: "fight-picks-reveal" });
+    for (const p of PLAYERS) {
+      const pk = allPicks[p.slug]?.picks?.[f.id];
+      if (!pk) continue;
+      const extra = [pk.r ? "R" + pk.r : null, pk.m ? METHODS.find((m) => m.v === pk.m)?.label : null].filter(Boolean).join(" ");
+      reveal.append(el("div", { class: "reveal-row" },
+        el("span", {}, el("b", {}, p.name + ": "), pk.n + (extra ? ` (${extra})` : "")),
+        el("span", { class: "pts " + (pk.c ? "p1" : "p0") }, pk.c ? "✓" : "✗")));
+    }
+    node.append(reveal);
+    return node;
+  }
   if (locked) {
     const reveal = el("div", { class: "fight-picks-reveal" });
     for (const p of PLAYERS) {
@@ -817,6 +865,26 @@ async function setPick(f, newPick) {
 function renderEventScoreboard(ev, fights, allPicks, locked) {
   const box = $("event-scoreboard");
   box.innerHTML = "";
+  if (ev.archived && ev.archTotals) {
+    const ranked = PLAYERS.filter((p) => ev.archTotals[p.slug])
+      .sort((a, b) => ev.archTotals[b.slug].pts - ev.archTotals[a.slug].pts);
+    const tbl = el("table", {},
+      el("tr", {}, ...["Player", "Pts", "Correct", "Bonus", ""].map((h) => el("th", {}, h))),
+      ...ranked.map((p, i) => {
+        const s = ev.archTotals[p.slug];
+        const flags = [s.perfect ? "\u{1F3AF} Perfect" : null, s.noHit ? "\u{1F4A9} No-Hitter" : null].filter(Boolean).join(" ");
+        return el("tr", { class: (p.slug === state.me ? "me" : "") + (i === 0 && s.pts > 0 ? " rank-1" : "") },
+          el("td", {}, p.name),
+          el("td", {}, el("b", {}, String(s.pts))),
+          el("td", {}, `${s.c}/${s.decided}`),
+          el("td", {}, String(s.pts - s.c)),
+          el("td", {}, flags));
+      }));
+    box.append(
+      el("div", { class: "card-section-title", style: "margin-top:22px" }, "Scoreboard (from the sheet)"),
+      el("div", { class: "table-wrap" }, tbl));
+    return;
+  }
   const anyResults = fights.some((f) => f.result);
   if (!locked && !anyResults) {
     // pre-lock: show my pick completion (omitted fights don't count)
@@ -1037,14 +1105,32 @@ function legacyCareer(lg) {
 
 async function computeAppStats() {
   // per-year app aggregates: {year: {fights, players: {slug: {...}}}}
+  // Archived (sheet-imported) events carry precomputed totals on the event
+  // doc, so the board never has to deep-read 292 events' subcollections.
   const events = await DATA.listEvents();
   const perYear = {};
+  let hasArchive = false;
   for (const ev of events) {
+    const y = String(ev.year || yearOf(ev.dateISO));
+    if (ev.archived && ev.archTotals) {
+      hasArchive = true;
+      perYear[y] ||= { fights: 0, players: {} };
+      perYear[y].fights += ev.fightCount || 0;
+      for (const p of PLAYERS) {
+        const a = ev.archTotals[p.slug];
+        if (!a) continue;
+        const t = (perYear[y].players[p.slug] ||= { pts: 0, correct: 0, decided: 0, perfects: 0, noHitters: 0, pickemC: 0, pickemT: 0 });
+        t.pts += a.pts; t.correct += a.c; t.decided += a.decided;
+        if (a.perfect) t.perfects++;
+        if (a.noHit) t.noHitters++;
+        t.pickemC += a.peC || 0; t.pickemT += a.peT || 0;
+      }
+      continue;
+    }
     const fights = await DATA.listFights(ev.id);
     if (!fights.some((f) => f.result)) continue;
     const picks = await DATA.getAllPicks(ev.id);
     const s = scoreEvent(fights, picks, ev);
-    const y = String(ev.year || yearOf(ev.dateISO));
     perYear[y] ||= { fights: 0, players: {} };
     perYear[y].fights += fights.filter((f) => !f.omitted && f.result && f.result.winner).length;
     for (const p of PLAYERS) {
@@ -1057,6 +1143,7 @@ async function computeAppStats() {
       t.pickemC += x.pickemCorrect; t.pickemT += x.pickemTotal;
     }
   }
+  perYear.__hasArchive = hasArchive;
   return perYear;
 }
 
@@ -1094,10 +1181,12 @@ async function renderBoard() {
   body.innerHTML = "";
   body.append(el("div", { class: "card muted small" }, "Crunching numbers…"));
 
-  const legacy = await DATA.getLegacy();
+  let legacy = await DATA.getLegacy();
   const perYear = await computeAppStats();
+  const hasArchive = perYear.__hasArchive;
+  if (hasArchive) legacy = null; // full history imported — event data is the single source of truth
 
-  const appYears = Object.keys(perYear).map(Number);
+  const appYears = Object.keys(perYear).filter((k) => /^\d+$/.test(k)).map(Number);
   const maxYear = Math.max(new Date().getFullYear(), ...(appYears.length ? appYears : [2019]));
   const allYears = [];
   for (let y = 2019; y <= maxYear; y++) allYears.push(String(y));
@@ -1149,7 +1238,7 @@ async function renderBoard() {
       el("td", {}, String(r.noHitters)))));
   body.append(el("div", { class: "table-wrap" }, tbl));
 
-  if (!legacy) {
+  if (!legacy && !hasArchive) {
     body.append(el("div", { class: "card muted small", style: "margin-top:10px" },
       "Spreadsheet history not imported yet — go to Settings → Import 2019–2026 totals."));
   }
@@ -1173,7 +1262,11 @@ async function renderBoard() {
         el("tr", {}, el("td", {}, "Fights"), ...tfCells, el("td", {}, ""))))));
   }
 
-  if (legacy) {
+  if (hasArchive) {
+    body.append(el("div", { class: "muted small", style: "margin-top:12px;padding:0 4px" },
+      "Computed from every imported card (2019–present) plus live app events. " +
+      "Numbers may differ a touch from the old sheet's summary — its formulas had gaps the import doesn't."));
+  } else if (legacy) {
     body.append(el("div", { class: "muted small", style: "margin-top:12px;padding:0 4px" },
       mode === "All-Time"
         ? "Includes spreadsheet history (2019 through " + (legacy.snapshotDate || "July 2026") + ") plus everything tracked in the app. " +
@@ -1182,6 +1275,77 @@ async function renderBoard() {
         : "Spreadsheet totals for " + mode + " plus app-tracked events. \u{1F3AF} Perfects / \u{1F4A9} No-Hitters per-year cover the app era only (the sheet tracked them career-wide)."));
   }
 }
+/* ================= full history import ================= */
+async function importHistory() {
+  if (!confirm("Import all 292 cards from the spreadsheet (2019–2026)?\nThis takes a few minutes and only needs doing once.")) return;
+  let data;
+  try {
+    data = await (await fetch("history-data.json", { cache: "no-store" })).json();
+  } catch (e) { toast("Couldn't load history-data.json: " + e.message); return; }
+  const existing = new Set((await DATA.listEvents()).map((e) => e.id));
+  let done = 0, skipped = 0, failed = 0;
+  DATA.beginBulk?.();
+  for (const h of data.events) {
+    if (existing.has(h.id)) { skipped++; continue; }
+    try {
+      // precompute per-player totals so the leaderboard never deep-reads archives
+      const archTotals = {};
+      const decidedIdx = h.fights.map((f, i) => (f.res && f.res.w ? i : -1)).filter((i) => i >= 0);
+      for (const p of PLAYERS) {
+        if (h.totalsOverride) {
+          const o = h.totalsOverride[p.slug];
+          if (o) archTotals[p.slug] = { c: o.c, pts: o.pts, decided: h.fightCount || 0, peC: o.peC || 0, peT: o.peT || 0, perfect: false, noHit: false };
+          continue;
+        }
+        const picks = h.picks[p.slug] || [];
+        if (!picks.some(Boolean)) continue;
+        let c = 0, peC = 0, peT = 0;
+        for (const i of decidedIdx) {
+          const pk = picks[i];
+          if (pk?.c) c++;
+          if (h.fights[i].pe) { peT++; if (pk?.c) peC++; }
+        }
+        const pts = c + (h.bonus[p.slug] || 0);
+        archTotals[p.slug] = {
+          c, pts, decided: decidedIdx.length, peC, peT,
+          perfect: decidedIdx.length > 0 && c === decidedIdx.length,
+          noHit: decidedIdx.length > 0 && c === 0,
+        };
+      }
+      await DATA.saveEvent({
+        id: h.id, espnId: h.espnId, name: h.name, dateISO: h.dateISO,
+        startMs: new Date(h.dateISO).getTime(), year: yearOf(h.dateISO),
+        archived: true, sheetTab: h.tab, fightCount: h.fightCount || h.fights.length,
+        manualBonus: h.bonus, archTotals, note: h.note || null,
+      });
+      for (const f of h.fights) {
+        await DATA.saveFight(h.id, {
+          id: "f" + f.o, order: f.o, section: f.sec, f1: f.f1, f2: f.f2,
+          rounds: 3, pickem: !!f.pe, omitted: false,
+          result: f.res ? { winner: f.res.w, round: f.res.r, method: f.res.m, detail: f.res.d, text: f.res.txt, clock: null } : null,
+        });
+      }
+      for (const p of PLAYERS) {
+        const arr = h.picks[p.slug] || [];
+        if (!arr.some(Boolean)) continue;
+        const picksObj = {};
+        arr.forEach((pk, i) => {
+          if (pk) picksObj["f" + i] = { w: pk.w || 0, n: pk.txt, r: pk.r || null, m: pk.m || null, c: !!pk.c };
+        });
+        await DATA.savePicksFor(h.id, p.slug, { picks: picksObj, archived: true, updatedAt: Date.now() });
+      }
+      done++;
+      if (done % 20 === 0) toast(`Importing history… ${done}/${data.events.length - skipped}`, 4000);
+    } catch (e) {
+      console.error("import failed for", h.tab, e);
+      failed++;
+    }
+  }
+  DATA.endBulk?.();
+  toast(`History import done — ${done} imported, ${skipped} already there${failed ? ", " + failed + " FAILED" : ""}`, 6000);
+  refreshEvents();
+}
+
 /* ================= settings ================= */
 async function importLegacy() {
   const existing = await DATA.getLegacy();
@@ -1241,6 +1405,7 @@ async function boot() {
   $("btn-signout").onclick = async () => { await DATA.signOut(); state.me = null; renderSignin(); };
   $("btn-change-pin").onclick = changePinModal;
   $("btn-import-legacy").onclick = importLegacy;
+  $("btn-import-history").onclick = importHistory;
 
   // resume session?
   const slug = DATA.currentSlug();
