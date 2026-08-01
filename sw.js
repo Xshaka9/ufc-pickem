@@ -1,5 +1,5 @@
 /* UFC Pick'em service worker — cache-first app shell, network for data */
-const CACHE = "ufc-pickem-v5";
+const CACHE = "ufc-pickem-v6";
 const SHELL = [
   "./",
   "./index.html",

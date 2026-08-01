@@ -1024,7 +1024,61 @@ function editEventModal(ev) {
   ]);
 }
 
-/* ================= leaderboard ================= */
+/* ================= leaderboard / stats ================= */
+// Career points are computed from the yearly with-bonus columns (the sheet's
+// own "Total Points w/ Bonus" formula was stale — it stopped at 2024).
+function legacyCareer(lg) {
+  if (!lg) return { pts: 0, correct: 0, fights: 0, perfects: 0, noHitters: 0 };
+  const pts = Object.values(lg.withBonusByYear || {}).reduce((a, b) => a + b, 0) || lg.totalPointsWithBonus || 0;
+  const correct = lg.correctPicks || 0;
+  const fights = lg.percentage ? Math.round((correct / lg.percentage) * 100) : 0;
+  return { pts, correct, fights, perfects: lg.perfects || 0, noHitters: lg.noHitters || 0 };
+}
+
+async function computeAppStats() {
+  // per-year app aggregates: {year: {fights, players: {slug: {...}}}}
+  const events = await DATA.listEvents();
+  const perYear = {};
+  for (const ev of events) {
+    const fights = await DATA.listFights(ev.id);
+    if (!fights.some((f) => f.result)) continue;
+    const picks = await DATA.getAllPicks(ev.id);
+    const s = scoreEvent(fights, picks, ev);
+    const y = String(ev.year || yearOf(ev.dateISO));
+    perYear[y] ||= { fights: 0, players: {} };
+    perYear[y].fights += fights.filter((f) => !f.omitted && f.result && f.result.winner).length;
+    for (const p of PLAYERS) {
+      const x = s[p.slug];
+      if (!x.participated) continue;
+      const t = (perYear[y].players[p.slug] ||= { pts: 0, correct: 0, decided: 0, perfects: 0, noHitters: 0, pickemC: 0, pickemT: 0 });
+      t.pts += x.pts; t.correct += x.correct; t.decided += x.decided;
+      if (x.perfect) t.perfects++;
+      if (x.noHitter) t.noHitters++;
+      t.pickemC += x.pickemCorrect; t.pickemT += x.pickemTotal;
+    }
+  }
+  return perYear;
+}
+
+function statMatrix(title, years, cellFn) {
+  const tbl = el("table", {},
+    el("tr", {}, el("th", {}, "Player"), ...years.map((y) => el("th", {}, y)), el("th", {}, "Total")),
+    ...PLAYERS.map((p) => {
+      let total = 0;
+      const cells = years.map((y) => {
+        if (Number(y) < p.joinedYear) return el("td", { class: "muted" }, "—");
+        const v = cellFn(p, y);
+        total += v;
+        return el("td", {}, String(v));
+      });
+      return el("tr", { class: p.slug === state.me ? "me" : "" },
+        el("td", {}, p.name), ...cells, el("td", {}, el("b", {}, String(total))));
+    }));
+  return el("div", {},
+    el("div", { class: "card-section-title", style: "margin-top:22px" }, title),
+    el("div", { class: "table-wrap" }, tbl));
+}
+
 async function renderBoard() {
   const yearSel = $("board-year");
   if (!yearSel.dataset.filled) {
@@ -1041,73 +1095,93 @@ async function renderBoard() {
   body.append(el("div", { class: "card muted small" }, "Crunching numbers…"));
 
   const legacy = await DATA.getLegacy();
-  const events = await DATA.listEvents();
-  // pull per-event scores (only decided fights count)
-  const agg = {};
-  for (const p of PLAYERS) agg[p.slug] = { pts: 0, correct: 0, decided: 0, perfects: 0, noHitters: 0, pickemC: 0, pickemT: 0 };
-  const wanted = events.filter((e) => mode === "All-Time" || String(e.year || yearOf(e.dateISO)) === mode);
-  for (const ev of wanted) {
-    const fights = await DATA.listFights(ev.id);
-    if (!fights.some((f) => f.result)) continue;
-    const picks = await DATA.getAllPicks(ev.id);
-    const s = scoreEvent(fights, picks, ev);
-    for (const p of PLAYERS) {
-      const x = s[p.slug];
-      if (!x.participated) continue; // skipped this card — doesn't count against them
-      agg[p.slug].pts += x.pts; agg[p.slug].correct += x.correct; agg[p.slug].decided += x.decided;
-      if (x.perfect) agg[p.slug].perfects++;
-      if (x.noHitter) agg[p.slug].noHitters++;
-      agg[p.slug].pickemC += x.pickemCorrect; agg[p.slug].pickemT += x.pickemTotal;
-    }
-  }
+  const perYear = await computeAppStats();
 
-  // merge legacy
+  const appYears = Object.keys(perYear).map(Number);
+  const maxYear = Math.max(new Date().getFullYear(), ...(appYears.length ? appYears : [2019]));
+  const allYears = [];
+  for (let y = 2019; y <= maxYear; y++) allYears.push(String(y));
+
+  const appOf = (slug, y) => perYear[y]?.players?.[slug] || { pts: 0, correct: 0, decided: 0, perfects: 0, noHitters: 0, pickemC: 0, pickemT: 0 };
+
+  // ---- summary rows for the selected scope ----
   const rows = PLAYERS.map((p) => {
-    const a = agg[p.slug];
-    let pts = a.pts, correct = a.correct, decided = a.decided, perfects = a.perfects, noHitters = a.noHitters;
     const lg = legacy?.players?.[p.slug];
-    if (lg) {
-      if (mode === "All-Time") {
-        pts += lg.totalPointsWithBonus || 0;
-        correct += lg.correctPicks || 0;
-        decided += lg.percentage ? Math.round((lg.correctPicks / lg.percentage) * 100) : 0;
-        perfects += lg.perfects || 0;
-        noHitters += lg.noHitters || 0;
-      } else {
-        const yc = lg.correctByYear?.[mode];
-        const yb = lg.withBonusByYear?.[mode];
-        if (yc !== undefined) correct += yc;
-        if (yb !== undefined) pts += yb;
+    let pts = 0, correct = 0, decided = 0, perfects = 0, noHitters = 0, pickemC = 0, pickemT = 0;
+    if (mode === "All-Time") {
+      const c = legacyCareer(lg);
+      pts += c.pts; correct += c.correct; decided += c.fights; perfects += c.perfects; noHitters += c.noHitters;
+      for (const y of allYears) {
+        const a = appOf(p.slug, y);
+        pts += a.pts; correct += a.correct; decided += a.decided;
+        perfects += a.perfects; noHitters += a.noHitters;
+        pickemC += a.pickemC; pickemT += a.pickemT;
+      }
+    } else {
+      const a = appOf(p.slug, mode);
+      pts = a.pts; correct = a.correct; decided = a.decided;
+      perfects = a.perfects; noHitters = a.noHitters; pickemC = a.pickemC; pickemT = a.pickemT;
+      if (lg) {
+        if (lg.correctByYear?.[mode] !== undefined) correct += lg.correctByYear[mode];
+        if (lg.withBonusByYear?.[mode] !== undefined) pts += lg.withBonusByYear[mode];
         const tf = legacy.totalFightsByYear?.[mode];
         if (tf) decided += tf;
       }
     }
-    return { p, pts, correct, decided, perfects, noHitters, a };
+    // pick'em: app-era stats when available, else the sheet's snapshot value
+    let pickem = "—";
+    if (pickemT > 0) pickem = ((pickemC / pickemT) * 100).toFixed(0) + "% (" + pickemC + "/" + pickemT + ")";
+    else if (mode === "All-Time" && lg?.pickemPercentage) pickem = lg.pickemPercentage.toFixed(1) + "%*";
+    return { p, pts, correct, decided, perfects, noHitters, pickem };
   });
   rows.sort((x, y) => y.pts - x.pts);
 
   body.innerHTML = "";
   const tbl = el("table", {},
-    el("tr", {}, ...["Player", "Points", "Correct", "%", "\u{1F3AF}", "\u{1F4A9}"].map((h) => el("th", {}, h))),
+    el("tr", {}, ...["Player", "Points", "Correct", "%", "Pick'em", "\u{1F3AF}", "\u{1F4A9}"].map((h) => el("th", {}, h))),
     ...rows.map((r, i) => el("tr", { class: (r.p.slug === state.me ? "me" : "") + (i === 0 && r.pts > 0 ? " rank-1" : "") },
       el("td", {}, r.p.name),
       el("td", {}, el("b", {}, String(r.pts))),
       el("td", {}, String(r.correct)),
       el("td", {}, r.decided ? ((r.correct / r.decided) * 100).toFixed(1) + "%" : "—"),
+      el("td", {}, r.pickem),
       el("td", {}, String(r.perfects)),
       el("td", {}, String(r.noHitters)))));
   body.append(el("div", { class: "table-wrap" }, tbl));
+
   if (!legacy) {
     body.append(el("div", { class: "card muted small", style: "margin-top:10px" },
       "Spreadsheet history not imported yet — go to Settings → Import 2019–2026 totals."));
-  } else {
-    body.append(el("div", { class: "muted small", style: "margin-top:10px;padding:0 4px" },
+  }
+
+  // ---- year-by-year matrices (sheet style), All-Time view only ----
+  if (mode === "All-Time") {
+    body.append(statMatrix("Correct Picks by Year", allYears,
+      (p, y) => (legacy?.players?.[p.slug]?.correctByYear?.[y] || 0) + appOf(p.slug, y).correct));
+    body.append(statMatrix("Points w/ Bonus by Year", allYears,
+      (p, y) => (legacy?.players?.[p.slug]?.withBonusByYear?.[y] || 0) + appOf(p.slug, y).pts));
+
+    // total fights per year (the sheet tracked this from 2023 on)
+    const tfCells = allYears.map((y) => {
+      const v = (legacy?.totalFightsByYear?.[y] || 0) + (perYear[y]?.fights || 0);
+      return el("td", {}, v ? String(v) : "—");
+    });
+    body.append(el("div", {},
+      el("div", { class: "card-section-title", style: "margin-top:22px" }, "Total Fights by Year"),
+      el("div", { class: "table-wrap" }, el("table", {},
+        el("tr", {}, el("th", {}, ""), ...allYears.map((y) => el("th", {}, y)), el("th", {}, "")),
+        el("tr", {}, el("td", {}, "Fights"), ...tfCells, el("td", {}, ""))))));
+  }
+
+  if (legacy) {
+    body.append(el("div", { class: "muted small", style: "margin-top:12px;padding:0 4px" },
       mode === "All-Time"
-        ? "Includes spreadsheet history 2019–" + (legacy.snapshotDate || "2026") + " plus everything tracked in the app."
-        : "Includes spreadsheet totals for " + mode + " plus app-tracked events. \u{1F3AF} = perfect cards, \u{1F4A9} = no-hitters (app-tracked era only for yearly view)."));
+        ? "Includes spreadsheet history (2019 through " + (legacy.snapshotDate || "July 2026") + ") plus everything tracked in the app. " +
+          "Career points are summed from the yearly columns — the sheet's own career-points cell had quietly stopped adding after 2024. " +
+          "* Pick'em % with a star is the sheet's snapshot; the app tracks Pick'em fights properly from here on (flag them with ⚔ in the fight editor)."
+        : "Spreadsheet totals for " + mode + " plus app-tracked events. \u{1F3AF} Perfects / \u{1F4A9} No-Hitters per-year cover the app era only (the sheet tracked them career-wide)."));
   }
 }
-
 /* ================= settings ================= */
 async function importLegacy() {
   const existing = await DATA.getLegacy();
